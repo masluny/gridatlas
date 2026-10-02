@@ -1,0 +1,18 @@
+{
+  "name": "gridatlas",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Offline world map split into selectable windows of about 16 km.",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "author": "Kacper Kotowski",
+  "exports": {
+    ".": "./src/gridatlas.js"
+  },
+  "scripts": {
+    "fetch-cities": "node scripts/fetch-cities.mjs",
+    "pack": "node scripts/pack.mjs",
+    "check": "node scripts/check.mjs",
+    "start": "python3 -m http.server 8765"
+  }
+}

@@ -1,0 +1,122 @@
+:root {
+  color-scheme: light;
+  --ink: #2c241c;
+  --muted: #6a5e52;
+  --paper: #f6f1e6;
+  --line: #e3d7c6;
+  --accent: #0f8f9c;
+  --ocean: #7eafc0;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--ocean);
+  color: var(--ink);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+#map { position: fixed; inset: 0; }
+
+#panel {
+  position: fixed;
+  z-index: 3;
+  top: 14px;
+  left: 14px;
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.search { display: block; position: relative; }
+
+input {
+  width: 100%;
+  border: 1px solid rgba(70, 52, 32, 0.22);
+  background: #fffaf2;
+  color: var(--ink);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 14px;
+  box-shadow: 0 6px 18px rgba(40, 28, 16, 0.16);
+}
+
+input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#results {
+  position: absolute;
+  z-index: 4;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  background: #fffaf2;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: auto;
+  max-height: 240px;
+  box-shadow: 0 8px 24px rgba(40, 28, 16, 0.12);
+}
+
+#results button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #f0e6d8;
+  padding: 8px 10px;
+  font: inherit;
+  cursor: pointer;
+  color: inherit;
+}
+
+#results button:last-child { border-bottom: 0; }
+#results button:hover, #results button[aria-selected="true"] { background: #dff3f4; }
+#results small { display: block; color: var(--muted); font-size: 12px; }
+
+#chosen {
+  align-self: flex-start;
+  border: 1px solid rgba(70, 52, 32, 0.22);
+  background: #fffaf2;
+  color: var(--ink);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-family: Palatino, "Palatino Linotype", Georgia, serif;
+  font-size: 18px;
+  box-shadow: 0 6px 18px rgba(40, 28, 16, 0.16);
+  cursor: copy;
+}
+
+#chosen:hover { background: #dff3f4; }
+#chosen[hidden] { display: none; }
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+@media (max-width: 720px) {
+  #panel {
+    top: auto;
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    width: auto;
+    flex-direction: column-reverse;
+  }
+  #results { top: auto; bottom: calc(100% + 4px); }
+  .ga-corner { bottom: 60px !important; }
+}
