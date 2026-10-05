@@ -16,6 +16,20 @@ export function bboxOfRings(rings) {
   return [minLon, minLat, maxLon, maxLat];
 }
 
+// detail.js stores each ring as integers in thousandths of a degree: the
+// first point, then the step to each next point.
+export function decodeRing(flat) {
+  const ring = new Array(flat.length / 2);
+  let x = 0;
+  let y = 0;
+  for (let i = 0; i < flat.length; i += 2) {
+    x += flat[i];
+    y += flat[i + 1];
+    ring[i / 2] = [x / 1000, y / 1000];
+  }
+  return ring;
+}
+
 export function pointInRing(lon, lat, ring) {
   let inside = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {

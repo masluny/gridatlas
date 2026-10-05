@@ -1,5 +1,7 @@
 import { countryAt, nearestPlace } from "../src/locate.js";
 import { atlas } from "../src/atlas.js";
+import { detail } from "../src/detail.js";
+import { decodeRing, pointInRing } from "../src/geom.js";
 import {
   GRID,
   columnLabel,
@@ -58,19 +60,19 @@ for (let i = 0; i < 400; i++) {
 
 const covered = windowsOverlapping(WARSAW);
 const ids = new Set(covered.map((w) => w.id));
-assert(covered.length === 4, `Warsaw windows: ${covered.map((w) => w.id).join(", ")}`);
-assert(new Set(covered.map((w) => w.row)).size === 2, "two rows");
-assert(new Set(covered.map((w) => w.column)).size === 2, "two columns");
+assert(covered.length === 64, `Warsaw windows: ${covered.map((w) => w.id).join(", ")}`);
+assert(new Set(covered.map((w) => w.row)).size === 8, "eight rows");
+assert(new Set(covered.map((w) => w.column)).size === 8, "eight columns");
 
 const spanLat = WARSAW.north - WARSAW.south;
 const spanLon = WARSAW.east - WARSAW.west;
-for (const win of covered) {
-  const latShare =
-    (Math.min(win.bounds.north, WARSAW.north) - Math.max(win.bounds.south, WARSAW.south)) / spanLat;
-  const lonShare =
-    (Math.min(win.bounds.east, WARSAW.east) - Math.max(win.bounds.west, WARSAW.west)) / spanLon;
-  assert(latShare > 0.2 && lonShare > 0.2, `${win.id} share lat ${latShare} lon ${lonShare}`);
-}
+// The middle of Warsaw sits on a grid corner, give or take a tenth of a window.
+const middle = windowAt((WARSAW.south + WARSAW.north) / 2, (WARSAW.west + WARSAW.east) / 2);
+const latStep = 180 / GRID.rows;
+const lonStep = 360 / GRID.cols;
+const offLat = Math.abs((WARSAW.south + WARSAW.north) / 2 - Math.round(((WARSAW.south + WARSAW.north) / 2 + 90) / latStep) * latStep + 90);
+const offLon = Math.abs((WARSAW.west + WARSAW.east) / 2 - Math.round(((WARSAW.west + WARSAW.east) / 2 + 180) / lonStep) * lonStep + 180);
+assert(offLat < latStep / 10 && offLon < lonStep / 10, `middle of Warsaw is off the grid corner near ${middle.id}`);
 
 for (let i = 0; i < 36; i++) {
   for (let j = 0; j < 36; j++) {
@@ -86,7 +88,7 @@ for (let i = 0; i < 36; i++) {
 }
 
 const krakow = windowAt(50.0647, 19.945);
-assert(!ids.has(krakow.id), "Krakow is outside Warsaw's four windows");
+assert(!ids.has(krakow.id), "Krakow is outside Warsaw's windows");
 
 assert(countryAt(52.23, 21.01) === "Poland", `Warsaw country ${countryAt(52.23, 21.01)}`);
 assert(countryAt(48.8566, 2.3522) === "France", `Paris country ${countryAt(48.8566, 2.3522)}`);
@@ -97,10 +99,31 @@ const near = nearestPlace(52.23, 21.01);
 assert(near && near.name === "Warsaw", `nearest ${near && near.name}`);
 assert(atlas.rivers.some((river) => river.n === "Vistula"), "Vistula is on the map");
 
+function inside(layer, lat, lon) {
+  for (const feature of layer) {
+    for (const part of feature.parts) {
+      if (!pointInRing(lon, lat, decodeRing(part.outer))) continue;
+      if (!part.holes.some((hole) => pointInRing(lon, lat, decodeRing(hole)))) return true;
+    }
+  }
+  return false;
+}
+const builtUp = (lat, lon) => inside(detail.urban, lat, lon);
+assert(Array.isArray(detail.urban) && detail.urban.length > 0, "built-up areas are in detail.js");
+assert(inside(detail.land, 52.23, 21.01), "Warsaw is on the detailed land");
+assert(!inside(detail.land, 55.5, 18.0), "the Baltic is not land");
+assert(inside(detail.lakes, 46.45, 6.55), "Lake Geneva is a lake");
+assert(detail.rivers.some((river) => river.n === "Vistula"), "Vistula is in the detailed rivers");
+assert(builtUp(52.23, 21.01), "central Warsaw is built up");
+assert(builtUp(48.8566, 2.3522), "central Paris is built up");
+assert(builtUp(35.68, 139.69), "central Tokyo is built up");
+assert(!builtUp(52.32, 20.55), "Kampinos forest next to Warsaw is not built up");
+assert(!builtUp(25, 15), "the Sahara is not built up");
+
 const sample = covered
   .map((w) => `${w.id} ${w.widthKm.toFixed(1)}×${w.heightKm.toFixed(1)} km`)
   .join("\n  ");
-console.log(`Warsaw's four windows:\n  ${sample}`);
+console.log(`Warsaw's ${covered.length} windows:\n  ${sample}`);
 
 if (failed) {
   console.error(`${failed} failed`);

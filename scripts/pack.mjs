@@ -1,12 +1,16 @@
-// Bake Natural Earth geography into src/atlas.js.
-// Countries, lakes, and rivers: 1:50m. Cities: 1:10m populated places.
-// Both scales are public domain (naturalearthdata.com).
-// Smaller cities and towns come from Wikidata (CC0), see fetch-cities.mjs.
+// Bake the geography into two files.
+// src/atlas.js loads with the map: countries, lakes and rivers at 1:50m,
+// cities and country labels. src/detail.js is fetched in the background and
+// takes over once you zoom in: countries, lakes and rivers at 1:10m, and
+// built-up areas.
+// Natural Earth is public domain (naturalearthdata.com). Smaller cities and
+// towns come from Wikidata (CC0), see fetch-cities.mjs. Built-up areas come
+// from NASA MODIS land cover (CC0), see fetch-urban.py.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { countryAtPoint, preparePolygons } from "../src/geom.js";
+import { countryAtPoint, decodeRing, preparePolygons } from "../src/geom.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const raw = join(root, "raw");
@@ -170,6 +174,89 @@ function packPolygons(features, nameOf, tolerance) {
   return { out, points };
 }
 
+function signedArea(ring) {
+  let sum = 0;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    sum += ring[j][0] * ring[i][1] - ring[i][0] * ring[j][1];
+  }
+  return sum / 2;
+}
+
+function ringKm2(ring) {
+  const lat = ring.reduce((total, p) => total + p[1], 0) / ring.length;
+  return Math.abs(signedArea(ring)) * 111.2 * 111.2 * Math.cos((lat * Math.PI) / 180);
+}
+
+// Counter-clockwise outer rings and clockwise holes, so the map can fill
+// the whole layer in one pass without nearby towns cancelling each other.
+function wind(ring, counterClockwise) {
+  return signedArea(ring) > 0 === counterClockwise ? ring : ring.slice().reverse();
+}
+
+// Built-up areas are many small polygons. The tolerance follows the size of
+// each one, so a town keeps its shape while a big city is simplified harder.
+// Everything goes into one feature.
+function packUrban(features, { minKm2, holeKm2, tolerance, detail }) {
+  const parts = [];
+  let points = 0;
+  let dropped = 0;
+  for (const feature of features) {
+    eachPolygon(feature.geometry, (polygon) => {
+      if (!polygon.length) return;
+      const area = ringKm2(polygon[0]);
+      if (area < minKm2) {
+        dropped += 1;
+        return;
+      }
+      const tol = Math.min(tolerance, (detail * Math.sqrt(area)) / 111.2);
+      const outer = cleanRing(polygon[0], tol, 3);
+      if (!outer) {
+        dropped += 1;
+        return;
+      }
+      const holes = [];
+      for (let i = 1; i < polygon.length; i++) {
+        if (ringKm2(polygon[i]) < holeKm2) continue;
+        const hole = cleanRing(polygon[i], tol, 3);
+        if (hole) holes.push(wind(hole, false));
+      }
+      points += outer.length;
+      for (const hole of holes) points += hole.length;
+      parts.push({ outer: wind(outer, true), holes });
+    });
+  }
+  return { out: parts.length ? [{ n: "", parts }] : [], points, polygons: parts.length, dropped };
+}
+
+// Rings and lines in detail.js are flat integer arrays in thousandths of a
+// degree: the first point, then the step to each next point. That is about
+// a third of the size of nested [lon, lat] pairs. geom.js decodeRing reads it.
+function encode(ring) {
+  const out = [];
+  let px = 0;
+  let py = 0;
+  for (const [x, y] of ring) {
+    const ix = Math.round(x * 1000);
+    const iy = Math.round(y * 1000);
+    out.push(ix - px, iy - py);
+    px = ix;
+    py = iy;
+  }
+  return out;
+}
+
+function encodePolygons(list) {
+  return list.map((f) => ({ n: f.n, parts: f.parts.map((p) => ({ outer: encode(p.outer), holes: p.holes.map(encode) })) }));
+}
+
+function decodePolygons(list) {
+  return list.map((f) => ({ n: f.n, parts: f.parts.map((p) => ({ outer: decodeRing(p.outer), holes: p.holes.map(decodeRing) })) }));
+}
+
+function encodeLines(list) {
+  return list.map((river) => ({ ...river, lines: river.lines.map(encode) }));
+}
+
 function packLines(features, tolerance) {
   const out = [];
   let points = 0;
@@ -185,6 +272,8 @@ function packLines(features, tolerance) {
     out.push({
       n: feature.properties.name || "",
       rank: feature.properties.scalerank || 6,
+      // The zoom level (web map style) from which Natural Earth shows it.
+      z: feature.properties.min_zoom ?? 0,
       lines,
     });
   }
@@ -200,6 +289,37 @@ const fine = packPolygons(countries.features, (f) => f.properties.NAME, 0.012);
 const coarse = packPolygons(countries.features, (f) => f.properties.NAME, 0.2);
 const lakePack = packPolygons(lakes.features, (f) => f.properties.name || "", 0.02);
 const riverPack = packLines(rivers.features, 0.015);
+
+// 1:10m, with the extra lakes and rivers Natural Earth has for Europe and
+// North America.
+const DETAIL = { land: 0.004, lakes: 0.004, rivers: 0.005 };
+const land10 = packPolygons(load("ne_10m_admin_0_countries.geojson").features, (f) => f.properties.NAME, DETAIL.land);
+const lakes10 = packPolygons(
+  ["ne_10m_lakes", "ne_10m_lakes_europe", "ne_10m_lakes_north_america"].flatMap((name) => load(`${name}.geojson`).features),
+  (f) => f.properties.name || "",
+  DETAIL.lakes,
+);
+const rivers10 = packLines(
+  ["ne_10m_rivers_lake_centerlines", "ne_10m_rivers_europe", "ne_10m_rivers_north_america"].flatMap(
+    (name) => load(`${name}.geojson`).features,
+  ),
+  DETAIL.rivers,
+);
+
+// Built-up areas: raw/urban.geojson, made by fetch-urban.py. Without it the
+// layer of the current detail.js is kept, so a rebuild never loses it.
+// minKm2 and tolerance (degrees) are tuned to keep the layer near 3 MB.
+// detail is the share of a polygon's width that its tolerance may reach.
+const URBAN = { minKm2: 4.5, holeKm2: 10, tolerance: 0.015, detail: 0.4 };
+let urbanPack;
+if (existsSync(join(raw, "urban.geojson"))) {
+  urbanPack = packUrban(load("urban.geojson").features, URBAN);
+} else {
+  const previous = existsSync(join(root, "src", "detail.js")) ? (await import("../src/detail.js")).detail : null;
+  const kept = previous && previous.urban ? decodePolygons(previous.urban) : [];
+  console.warn("raw/urban.geojson not found, keeping the built-up areas already in detail.js");
+  urbanPack = { out: kept, points: 0, polygons: kept.reduce((n, f) => n + f.parts.length, 0), dropped: 0 };
+}
 
 const labels = [];
 for (const feature of countries.features) {
@@ -318,25 +438,46 @@ const atlas = {
   labels,
 };
 
-const json = JSON.stringify(atlas);
 const file = `// Generated by scripts/pack.mjs from Natural Earth public-domain geography.
 // Countries, lakes, rivers: 1:50m. Cities: 1:10m populated places, plus
 // Wikidata (CC0) cities and towns of 10,000 people or more.
 // Do not edit by hand.
-export const atlas = ${json};
+export const atlas = ${JSON.stringify(atlas)};
 `;
 writeFileSync(join(root, "src", "atlas.js"), file);
+
+const detail = {
+  land: encodePolygons(land10.out),
+  lakes: encodePolygons(lakes10.out),
+  rivers: encodeLines(rivers10.out),
+  urban: encodePolygons(urbanPack.out),
+};
+const detailFile = `// Generated by scripts/pack.mjs. Countries, lakes, rivers: Natural Earth
+// 1:10m, public domain. Built-up areas: NASA MODIS land cover MCD12Q1 v6.1,
+// class 13 (CC0). Do not edit by hand.
+export const detail = ${JSON.stringify(detail)};
+`;
+writeFileSync(join(root, "src", "detail.js"), detailFile);
 
 const vistula = riverPack.out.filter((r) => r.n === "Vistula").map((r) => r.rank);
 console.log(
   JSON.stringify(
     {
       bytes: Buffer.byteLength(file),
+      detailBytes: Buffer.byteLength(detailFile),
+      land10Points: land10.points,
+      lakes10: lakes10.out.length,
+      lakes10Points: lakes10.points,
+      rivers10: rivers10.out.length,
+      rivers10Points: rivers10.points,
       countries: fine.out.length,
       landPoints: fine.points,
       coarsePoints: coarse.points,
       lakes: lakePack.out.length,
       lakePoints: lakePack.points,
+      urbanPolygons: urbanPack.polygons,
+      urbanPoints: urbanPack.points,
+      urbanDropped: urbanPack.dropped,
       rivers: riverPack.out.length,
       riverPoints: riverPack.points,
       places: placeList.length,

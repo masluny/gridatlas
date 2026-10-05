@@ -1,12 +1,14 @@
 // Worldwide window grid.
 //
-// The earth is tiled by 1,220 rows and 1,504 columns. Every window is the
-// same size in degrees: 180/1220° north–south and 360/1504° east–west.
-// At Warsaw that is about 16.3 km by 16.3 km.
+// The earth is tiled by 4,880 rows and 6,016 columns. Every window is the
+// same size in degrees: 180/4880° north–south and 360/6016° east–west.
+// At Warsaw that is about 4.1 km by 4.1 km.
 //
-// Those two divisors are the pair for which Warsaw's bounding box
-// (52.0978497°–52.3681531° N, 20.8516882°–21.2711512° E) falls in exactly
-// four windows, and the cross of those four sits on the middle of the city.
+// A quarter of each divisor (1,220 and 1,504) is the pair for which Warsaw's
+// bounding box (52.0978497°–52.3681531° N, 20.8516882°–21.2711512° E) falls
+// in exactly four windows, with their cross on the middle of the city (see
+// scripts/calibrate.mjs). Splitting each of those windows 4 by 4 keeps that
+// cross on a grid line, and Warsaw now covers 8 by 8 windows.
 // The same window size is used everywhere else.
 //
 // Windows are half-open: a window owns its south and west edges.
@@ -14,8 +16,8 @@
 // Numbers increase northward, letters increase eastward.
 
 export const GRID = Object.freeze({
-  rows: 1220,
-  cols: 1504,
+  rows: 4880,
+  cols: 6016,
 });
 
 const LAT_SPAN = 180;

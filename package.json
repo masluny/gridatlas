@@ -11,6 +11,7 @@
   },
   "scripts": {
     "fetch-cities": "node scripts/fetch-cities.mjs",
+    "fetch-urban": ".venv/bin/python scripts/fetch-urban.py",
     "pack": "node scripts/pack.mjs",
     "check": "node scripts/check.mjs",
     "start": "python3 -m http.server 8765"

@@ -1,6 +1,6 @@
 import { atlas } from "./atlas.js";
 import { countryAt, nearestPlace } from "./locate.js";
-import { preparePolygons } from "./geom.js";
+import { bboxOfRings, preparePolygons } from "./geom.js";
 import { GRID, windowAt, windowFromId, windowsOverlapping } from "./grid.js";
 import { projectY, unprojectY } from "./proj.js";
 
@@ -14,6 +14,88 @@ const WATERS = [
   ["Southern Ocean", 20, -62],
   ["Mediterranean", 18, 36],
 ];
+
+const LAND = "#d6e6be";
+const WATER = "#7eafc0";
+const COAST = "rgba(66, 98, 58, 0.8)";
+
+// Layers and labels switch on by zoom, in web map levels: the whole world is
+// 256 px wide at level 0 and each level doubles it. That keeps them
+// independent of the window size.
+
+// Built-up areas fade in over this range of levels, and only with the
+// detailed coastline they were clipped to.
+const URBAN_FROM = 4.35;
+const URBAN_FADE = 0.65;
+const URBAN_FILL = "#c6cfa9";
+
+// detail.js (1:10m land, lakes and rivers, built-up areas) is big, so it is
+// fetched once in the background and shared by every map on the page.
+let detailLoad = null;
+
+function loadDetail() {
+  detailLoad ??= import("./detail.js").then(({ detail }) => ({
+    land: prepareFlat(detail.land),
+    lakes: prepareFlat(detail.lakes),
+    urban: prepareFlat(detail.urban),
+    rivers: prepareRivers(detail.rivers, decodeFlat),
+  }));
+  return detailLoad;
+}
+
+// detail.js stores rings as integers in thousandths of a degree: the first
+// point, then the step to each next point. They are kept flat, [lon, lat,
+// lon, lat, ...], which takes far less memory than one array per point.
+function decodeFlat(steps) {
+  const out = new Float64Array(steps.length);
+  let x = 0;
+  let y = 0;
+  for (let i = 0; i < steps.length; i += 2) {
+    x += steps[i];
+    y += steps[i + 1];
+    out[i] = x / 1000;
+    out[i + 1] = y / 1000;
+  }
+  return out;
+}
+
+function flatBbox(rings) {
+  let minLon = 180;
+  let minLat = 90;
+  let maxLon = -180;
+  let maxLat = -90;
+  for (const ring of rings) {
+    for (let i = 0; i < ring.length; i += 2) {
+      if (ring[i] < minLon) minLon = ring[i];
+      if (ring[i] > maxLon) maxLon = ring[i];
+      if (ring[i + 1] < minLat) minLat = ring[i + 1];
+      if (ring[i + 1] > maxLat) maxLat = ring[i + 1];
+    }
+  }
+  return [minLon, minLat, maxLon, maxLat];
+}
+
+function prepareFlat(list) {
+  return list.map((item) => ({
+    n: item.n,
+    parts: item.parts.map((part) => {
+      const outer = decodeFlat(part.outer);
+      const holes = part.holes.map(decodeFlat);
+      return { outer, holes, bbox: flatBbox([outer, ...holes]) };
+    }),
+  }));
+}
+
+function prepareRivers(list, decode) {
+  return list.map((river) => ({
+    rank: river.rank,
+    z: river.z,
+    lines: river.lines.map((line) => {
+      const pts = decode ? decode(line) : line;
+      return { pts, bbox: decode ? flatBbox([pts]) : bboxOfRings([pts]) };
+    }),
+  }));
+}
 
 const CSS = `
 .ga-root {
@@ -166,24 +248,14 @@ export class GridMap {
     this.fine = preparePolygons(atlas.land);
     this.coarse = preparePolygons(atlas.coarse);
     this.lakes = preparePolygons(atlas.lakes);
-    this.rivers = atlas.rivers.map((river) => ({
-      rank: river.rank,
-      lines: river.lines.map((line) => {
-        let minLon = 180;
-        let minLat = 90;
-        let maxLon = -180;
-        let maxLat = -90;
-        for (let i = 0; i < line.length; i++) {
-          const lon = line[i][0];
-          const lat = line[i][1];
-          if (lon < minLon) minLon = lon;
-          if (lat < minLat) minLat = lat;
-          if (lon > maxLon) maxLon = lon;
-          if (lat > maxLat) maxLat = lat;
-        }
-        return { pts: line, bbox: [minLon, minLat, maxLon, maxLat] };
-      }),
-    }));
+    this.rivers = prepareRivers(atlas.rivers);
+    this.detail = null;
+    loadDetail()
+      .then((detail) => {
+        this.detail = detail;
+        this.requestDraw();
+      })
+      .catch(() => {});
 
     if (options.readout !== false) {
       this.readout = document.createElement("div");
@@ -234,10 +306,12 @@ export class GridMap {
     this.canvas.addEventListener("dblclick", this.onDbl);
     this.root.addEventListener("keydown", this.onKey);
 
+    // Resizing the canvas clears it, so redraw at once rather than on the
+    // next frame, or the map flashes blank.
     this.observer = new ResizeObserver(() => {
       this.layout();
       if (this.pendingFly && this.width >= 2 && this.height >= 2) this.startFly();
-      this.requestDraw();
+      this.draw();
     });
     this.observer.observe(this.root);
     this.layout();
@@ -627,6 +701,11 @@ export class GridMap {
   }
 
   traceRing(ring, offset) {
+    if (ring instanceof Float64Array) {
+      this.traceFlat(ring, offset);
+      this.ctx.closePath();
+      return;
+    }
     const ctx = this.ctx;
     for (let i = 0; i < ring.length; i++) {
       const x = this.xOf(ring[i][0] + offset);
@@ -637,7 +716,21 @@ export class GridMap {
     ctx.closePath();
   }
 
+  traceFlat(flat, offset) {
+    const ctx = this.ctx;
+    for (let i = 0; i < flat.length; i += 2) {
+      const x = this.xOf(flat[i] + offset);
+      const y = this.yOf(flat[i + 1]);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+  }
+
   traceLine(line, offset) {
+    if (line instanceof Float64Array) {
+      this.traceFlat(line, offset);
+      return;
+    }
     const ctx = this.ctx;
     for (let i = 0; i < line.length; i++) {
       const x = this.xOf(line[i][0] + offset);
@@ -647,7 +740,7 @@ export class GridMap {
     }
   }
 
-  drawPolygons(list, fill) {
+  drawPolygons(list, fill, rule = "evenodd") {
     const ctx = this.ctx;
     ctx.fillStyle = fill;
     for (let i = 0; i < list.length; i++) {
@@ -655,22 +748,30 @@ export class GridMap {
       for (let k = 0; k < this.offsets.length; k++) {
         const offset = this.offsets[k];
         ctx.beginPath();
-        let any = false;
+        let rings = 0;
         for (let p = 0; p < parts.length; p++) {
           const part = parts[p];
           if (!this.bboxHits(part.bbox, offset)) continue;
-          any = true;
           this.traceRing(part.outer, offset);
           for (let h = 0; h < part.holes.length; h++) this.traceRing(part.holes[h], offset);
+          // A path with thousands of rings builds very slowly, so fill in batches.
+          if (++rings === 64) {
+            ctx.fill(rule);
+            ctx.beginPath();
+            rings = 0;
+          }
         }
-        if (any) ctx.fill("evenodd");
+        if (rings) ctx.fill(rule);
       }
     }
   }
 
   strokePolygons(list) {
     const ctx = this.ctx;
+    ctx.strokeStyle = COAST;
+    ctx.lineWidth = 0.8;
     ctx.beginPath();
+    let rings = 0;
     for (let i = 0; i < list.length; i++) {
       const parts = list[i].parts;
       for (let k = 0; k < this.offsets.length; k++) {
@@ -679,29 +780,34 @@ export class GridMap {
           const part = parts[p];
           if (!this.bboxHits(part.bbox, offset)) continue;
           this.traceRing(part.outer, offset);
+          if (++rings === 64) {
+            ctx.stroke();
+            ctx.beginPath();
+            rings = 0;
+          }
         }
       }
     }
-    ctx.strokeStyle = "rgba(66, 98, 58, 0.8)";
-    ctx.lineWidth = 0.8;
-    ctx.stroke();
+    if (rings) ctx.stroke();
   }
 
-  drawRivers(cellPx) {
+  // Rivers show from the zoom level Natural Earth gives them and get wider
+  // as you zoom in. Big rivers are drawn wider than small ones.
+  drawRivers(rivers, zoom) {
     const ctx = this.ctx;
-    const boost = Math.max(0.75, Math.min(2.6, this.scale / 6000));
+    const boost = Math.max(0.75, Math.min(2.4, (zoom - 3) / 3));
+    const widths = [1.9, 1.4, 1, 0.7];
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    ctx.strokeStyle = "#4d86a0";
-    const ranks = cellPx > 5 ? [1, 2, 3, 4, 5, 6] : [1, 2, 3, 4];
-    for (let r = 0; r < ranks.length; r++) {
-      const rank = ranks[r];
+    ctx.strokeStyle = WATER;
+    for (let w = 0; w < widths.length; w++) {
       ctx.beginPath();
       let any = false;
-      const rivers = this.rivers;
       for (let i = 0; i < rivers.length; i++) {
         const river = rivers[i];
-        if (river.rank !== rank) continue;
+        if (river.z > zoom + 0.5) continue;
+        const size = river.rank <= 2 ? 0 : river.rank <= 5 ? 1 : river.rank <= 8 ? 2 : 3;
+        if (size !== w) continue;
         const lines = river.lines;
         for (let n = 0; n < lines.length; n++) {
           const line = lines[n];
@@ -714,8 +820,7 @@ export class GridMap {
         }
       }
       if (!any) continue;
-      const base = rank <= 2 ? 1.8 : rank <= 4 ? 1.25 : 0.75;
-      ctx.lineWidth = base * boost;
+      ctx.lineWidth = widths[w] * boost;
       ctx.stroke();
     }
   }
@@ -843,17 +948,17 @@ export class GridMap {
     }
   }
 
-  minPop(cellPx) {
-    if (cellPx < 2.5) return 2000000;
-    if (cellPx < 6) return 500000;
-    if (cellPx < 14) return 120000;
-    if (cellPx < 36) return 30000;
+  minPop(zoom) {
+    if (zoom < 3.9) return 2000000;
+    if (zoom < 5.15) return 500000;
+    if (zoom < 6.35) return 120000;
+    if (zoom < 7.7) return 30000;
     return 0;
   }
 
-  drawPlaces(cellPx) {
+  drawPlaces(zoom) {
     const ctx = this.ctx;
-    const minPop = this.minPop(cellPx);
+    const minPop = this.minPop(zoom);
     const places = atlas.places;
     const major = Math.max(minPop * 4, 50000);
     ctx.textAlign = "center";
@@ -899,10 +1004,10 @@ export class GridMap {
     }
   }
 
-  drawCountryLabels(cellPx) {
-    if (cellPx > 12) return;
+  drawCountryLabels(zoom) {
+    if (zoom > 6.15) return;
     const ctx = this.ctx;
-    const maxRank = cellPx < 3 ? 2 : cellPx < 6 ? 4 : 6;
+    const maxRank = zoom < 4.15 ? 2 : zoom < 5.15 ? 4 : 6;
     ctx.font = "500 13px Palatino, 'Palatino Linotype', Georgia, serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -929,8 +1034,8 @@ export class GridMap {
     }
   }
 
-  drawWaters(cellPx) {
-    if (cellPx > 5) return;
+  drawWaters(zoom) {
+    if (zoom > 4.9) return;
     const ctx = this.ctx;
     ctx.font = "italic 15px Palatino, 'Palatino Linotype', Georgia, serif";
     ctx.textAlign = "center";
@@ -977,22 +1082,34 @@ export class GridMap {
     const ctx = this.ctx;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.width, this.height);
-    ctx.fillStyle = "#7eafc0";
+    ctx.fillStyle = WATER;
     ctx.fillRect(0, 0, this.width, this.height);
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
 
     const cellPx = this.scale / GRID.cols;
+    const zoom = Math.log2(this.scale / 256);
     const span = this.viewEast - this.viewWest;
-    const land = span > 85 ? this.coarse : this.fine;
+    // The whole world uses the coarse outline. Closer in, the 1:10m layers
+    // take over once detail.js has arrived.
+    const detail = span > 85 ? null : this.detail;
+    const land = span > 85 ? this.coarse : detail ? detail.land : this.fine;
+    const lakes = detail ? detail.lakes : this.lakes;
 
-    this.drawPolygons(land, "#d6e6be");
-    this.drawPolygons(this.lakes, "#c5e0e8");
-    this.drawRivers(cellPx);
+    this.drawPolygons(land, LAND);
+    if (detail && zoom > URBAN_FROM) {
+      ctx.globalAlpha = Math.min(1, (zoom - URBAN_FROM) / URBAN_FADE);
+      this.drawPolygons(detail.urban, URBAN_FILL, "nonzero");
+      ctx.globalAlpha = 1;
+    }
+    // Rivers go under the lakes, so the lines through a lake disappear in it.
+    this.drawRivers(detail ? detail.rivers : this.rivers, zoom);
+    this.drawPolygons(lakes, WATER);
     this.strokePolygons(land);
+    this.strokePolygons(lakes);
 
     this.taken = this.avoid ? this.avoid().map((r) => ({ l: r.left, t: r.top, r: r.right, b: r.bottom })) : [];
-    if (cellPx < 16) this.drawGraticule();
+    if (cellPx < 24) this.drawGraticule();
     else this.drawNet();
 
     if (cellPx >= 4) {
@@ -1021,9 +1138,9 @@ export class GridMap {
     if (this.selection) named.push(this.selection);
     if (this.hover) named.push(this.hover);
     this.drawWindowNames(named, cellPx);
-    this.drawPlaces(cellPx);
-    this.drawCountryLabels(cellPx);
-    this.drawWaters(cellPx);
+    this.drawPlaces(zoom);
+    this.drawCountryLabels(zoom);
+    this.drawWaters(zoom);
     this.updateScale();
   }
 }

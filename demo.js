@@ -26,7 +26,7 @@ function viewPadding() {
 }
 
 function goTo(place) {
-  map.flyTo(place.lat, place.lon, { windowsAcross: 6, padding: viewPadding() });
+  map.flyTo(place.lat, place.lon, { windowsAcross: 24, padding: viewPadding() });
   results.hidden = true;
   query.value = "";
 }
@@ -100,4 +100,4 @@ chosen.addEventListener("click", async () => {
   }, 900);
 });
 
-map.flyTo(52.233, 21.0614, { windowsAcross: 6, padding: viewPadding() });
+map.flyTo(52.233, 21.0614, { windowsAcross: 24, padding: viewPadding() });
